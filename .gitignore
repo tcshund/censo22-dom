@@ -6,12 +6,6 @@ data/processed/
 *.csv
 *.parquet
 
-# Quarto
-_freeze/
-_site/
-docs/
-*.html
-
 # R
 .Rproj.user
 .Rhistory
