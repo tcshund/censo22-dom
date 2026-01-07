@@ -1,0 +1,21 @@
+# Dados
+data/logs/
+data/raw/
+data/processed/
+/data/
+*.csv
+*.parquet
+
+# Quarto
+_freeze/
+_site/
+docs/
+*.html
+
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+/.quarto/
+**/*.quarto_ipynb

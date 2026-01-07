@@ -1,0 +1,413 @@
+---
+title: "Import Data"
+---
+
+### Sobre
+
+Este script apresenta um pipeline reproduzível para baixar, organizar, padronizar e consolidar os dados agregados referentes à dados de Domicílos do **Universo do Censo Demográfico 2022** produzidos pelo Instituto Brasileiro de Geografia e Estatística - [IBGE](https://www.ibge.gov.br/).
+
+O objetivo é transformar os arquivos originais, distribuídos em múltiplos conjuntos temáticos e arquivos CSV, em um conjunto integrado, limpo e eficiente de bases no formato **parquet**:
+
+-   `01_basico.parquet`
+-   `02_domicilio.parquet`
+
+### Bibliotecas
+
+*Load Packages*
+
+```{r}
+#| label: packages
+#| code-fold: false
+#| output: false
+
+library(arrow)
+library(dplyr)
+library(fs)
+library(here)
+library(httr)
+library(janitor)
+library(purrr)
+library(readr)
+library(rvest)
+library(stringr)
+```
+
+### Configuração do ambiente
+
+*Set the Environment*
+
+```{r}
+#| label: set-the-environment
+# Definição da estrutura de pastas para organizar os dados 
+pasta_base <- here("data") 
+
+pastas <- c(
+  sprintf("%s/logs", pasta_base),
+  sprintf("%s/raw", pasta_base),
+  sprintf("%s/processed", pasta_base)
+)
+
+# Criar pastas se ainda não existirem
+for (pasta in pastas) {
+  dir.create(pasta, recursive = TRUE, showWarnings = FALSE)
+}
+
+# Atribuir nomes às variáveis 
+pasta_logs <- pastas[1]  # Erros, arquivos de log
+pasta_arqs <- pastas[2]  # Dados brutos (zips baixados e csvs descompactados)
+pasta_pqs  <- pastas[3]  # Dados processados (parquets e csvs temáticos)
+```
+
+Aumentar o tempo máximo permitido para downloads:\
+(padrão do R = 60s; arquivos do Censo são grandes e podem demorar mais)
+
+```{r}
+#| label: timeout
+#| output: false
+# getOption("timeout") # Descomente para verificar o valor atual options
+(timeout = 1000) # Define novo limite (em segundos, aprox. 16 min)
+```
+
+### 1. Baixar e descompactar os dados brutos
+
+*Import*
+
+#### 1.1 Definição do link de download
+
+O IBGE disponibiliza os agregados por setor censitário em duas versões:
+
+-   [XLSX](https://ftp.ibge.gov.br/Censos/Censo_Demografico_2022/Agregados_por_Setores_Censitarios/Agregados_por_Setor_xlsx/): menor, mas mais lenta para carregar
+-   CSV: maior, porém mais leve para importar no R
+
+Optamos pela versão CSV.
+
+```{r}
+#| label: link-ibge
+url <- "https://ftp.ibge.gov.br/Censos/Censo_Demografico_2022/Agregados_por_Setores_Censitarios/Agregados_por_Setor_csv/"
+```
+
+#### 1.2 Listagem dos arquivos disponíveis
+
+```{r}
+#| label: listagem-zips
+#| echo: false
+pagina <- read_html(url)
+
+arqs <- pagina |>
+  html_elements("a") |>
+  html_attr("href") |>
+  str_subset("\\.zip$")
+
+arqs
+```
+
+Vamos selecionar apenas os arquivos "Básico" e aqueles com dados de Domicílios.
+
+```{r}
+#| label: arqs-download
+#| echo: false
+get_file_size <- function(url) {
+  resp <- HEAD(url)
+  as.numeric(headers(resp)[["Content-Length"]] %||% 0)
+}
+
+# criar um vetor com as URLs completas dos zips
+urls <- file.path(url, arqs)
+
+urls <- urls |>
+  keep(~ str_detect(
+    basename(.),
+    regex("basico|domicilio", ignore_case = TRUE)
+  ))
+
+basename(urls)
+```
+
+#### 1.3 Obter o tamanho dos arquivos a serem baixados
+
+```{r}
+#| label: size-zips
+#| echo: false
+
+# calcular o tamanho total a ser baixado
+urls |>
+  map_dbl(get_file_size, .progress = TRUE) |>
+  sum() |>
+  as_fs_bytes()
+```
+
+#### 1.4 Download dos arquivos
+
+Baixar os arquivos zips, se ainda não existirem, e salvá-los na pasta "raw".
+
+```{r}
+#| label: download-zips
+#| output: false
+walk(urls, function(url) {
+  arquivo_local <- file.path(pasta_arqs, basename(url))
+  
+  if (!file_exists(arquivo_local)) {
+    size_esperado <- get_file_size(url)
+    resultado <- try(download.file(url, arquivo_local, quiet = TRUE), silent = TRUE)
+    
+    if (inherits(resultado, "try-error") || 
+        !file_exists(arquivo_local) || 
+        (size_esperado > 0 && file_size(arquivo_local) != size_esperado)) {
+      
+      cat("Erro no download:", basename(url), "\n")
+      
+      # Registro no log se tiver erro
+      download_error <- data.frame(
+        arquivo = basename(url),
+        tipo    = "universo_zip",
+        stringsAsFactors = FALSE
+      )
+      
+      out_file <- file.path(pasta_logs, "erros_download_arqs.csv")
+      write_delim(download_error, out_file, delim = ";",
+                  append = file_exists(out_file))
+      
+      if (file_exists(arquivo_local)) file_delete(arquivo_local)
+      return()
+    }
+    cat("Download concluído:", basename(url), "\n")
+  } else {
+    cat("Arquivo já existe na pasta:", basename(url), "\n")
+  }
+})
+```
+
+#### 1.5 Descompactar os arquivos
+
+Descompactar os arquivos em formato .zip vai gerar os arquivos em .csv. O resultado é salvo na pasta "processed".
+
+```{r}
+#| label: unzip
+#| output: false
+zip_files <- pasta_arqs |> 
+        dir_ls(type = "file", regexp = "\\.zip$")
+csv_files <- pasta_arqs |> 
+        dir_ls(type = "file", regexp = "\\.csv$")
+
+# Se a pasta CSV já tem arquivos, pula o unzip
+if (length(csv_files) == 0) {
+  zip_files |> 
+        map(\(x) unzip(x, exdir = pasta_arqs), .progress = TRUE)
+} else {
+  cat("Arquivos CSV já descompactados, pulando unzip...\n")
+}
+zip_files |> file_delete() 
+```
+
+### 2. Leitura e tratamento dos dados
+
+*Tidy*
+
+Nesta etapa, os arquivos CSV descompactados são lidos, padronizados e organizados em estruturas consistentes para posterior integração.
+
+#### 2.1 Criar função para leitura dos arquivos
+
+O trecho define a função `abrir_csv()`, que localiza todos os arquivos CSV em uma pasta usando um padrão (`reg_pattern`), lê todos eles como texto, concatena em um único data frame, padroniza nomes de colunas, converte para numéricas as variáveis de resultado (VXXXX), ordena pela primeira coluna (geralmente `cd_setor`) e devolve um objeto limpo e pronto para análise. A cada etapa, `arqs_csv` é atualizado, sempre substituindo o conteúdo anterior pelo novo.
+
+```{r}
+#| label: criar-funcao-abrir-csv
+abrir_csv <- function(reg_pattern) {
+# Localizar arquivos CSV que correspondem ao padrão informado ("reg_pattern")
+    arqs_csv <- list.files(pasta_arqs,
+                         pattern = reg_pattern,
+                         full.names = TRUE,
+                         recursive = FALSE)   
+# Ler os CSVs como texto e transformar em df
+  arqs_csv <- read_delim(arqs_csv,
+                         delim = ";",
+                         col_types = cols(.default = "c"),
+                         locale = locale(encoding = "iso_8859-1")) %>%
+    arrange(.[[1]]) # ordenar pela primeira coluna (cd_setor)
+  
+# Padronização (nomes snake_case, variáveis Vxxxx para maiúsculas (padrão oficial do IBGE)
+  arqs_csv <- arqs_csv %>%
+    clean_names() %>%
+    rename_at(vars(matches("^v[0-9]{4}[0-9]?$")), toupper) |>
+    rename(cd_setor = any_of("setor"))
+  
+# Tratamento especial para o arquivo "basico" 
+  if (str_detect(reg_pattern, "basico")) {
+      arqs_csv <- arqs_csv %>%
+      mutate_at(vars
+                (matches("V[0-9]{3}[0-9]?$")), 
+                ~ str_replace(., ',', '.')) %>%
+      mutate(area_km2 = str_replace(area_km2, ',', '.'))
+      
+    # extrair lista única de setores para uso nos parquets temáticos
+    setores <- arqs_csv %>% 
+      select(cd_setor) %>% 
+      distinct()
+
+    out_file <- sprintf("%s/00_setores.csv", pasta_pqs) 
+    write_delim(setores, out_file, delim = ';')
+  }
+  
+# Transformar valores que significam "ausência de dado" (X, x, . → NA)
+  arqs_csv <- arqs_csv %>%
+    mutate(
+        across(everything(), 
+               ~ str_replace(., "^[Xx\\.]$", 
+                             as.character(NA))))
+  
+# Todas as variáveis Vxxxx para numéricas
+  arqs_csv <- arqs_csv %>% 
+    mutate_at(vars
+              (matches("^V[0-9]{4}[0-9]?$")), 
+              as.numeric)
+  
+  return(arqs_csv)
+}
+```
+
+#### 2.2 Criar função para agrupamento de arquivos temáticos
+
+```{r}
+#| label: funcao-juntar-temas
+juntar_temas <- function(pattern_list, cod_setores) {
+  # Dataframe para agregar resultados
+  df <- cod_setores
+  # para cada padrão, abrir o CSV e juntar ao df
+  for (pat in pattern_list) {
+      tmp_df <- abrir_csv(pat)
+      df <- left_join(df, tmp_df, by = "cd_setor")
+  }
+# reordenar: cd_setor primeiro, depois em ordem alfabética
+  outras <- setdiff(names(df), "cd_setor")
+  df <- df[, c("cd_setor", sort(outras))]
+    
+  return(df)
+}
+```
+
+### 3. Transformar os arquivos csvs em parquets
+
+*Transform*
+
+Temas: Básico e Domicílios
+
+Para cada grupo, faz a mesma sequência:
+
+1.  **Lê os arquivos do grupo**\
+    Usando a primeira função criada `abrir_csv("tema")`
+2.  **Organiza os dados por setor censitário**\
+    Usando a segunda função criada `juntar_temas()`.
+3.  **Exporta para `.parquet`**\
+    Um formato mais leve e rápido que CSV. Arquivos salvos na pasta 03_processado.
+4.  **Remove objetos da memória** (rm e gc),\
+    Necessário porque arquivos são enormes.
+
+#### 3.1 Básico
+
+```{r}
+#| label: parquet-basico
+# Básico
+if (!file_exists(sprintf("%s/01_basico.parquet", pasta_pqs))) {
+  basico <- abrir_csv("basico")
+  basico <- basico %>% mutate(area_km2 = as.double(area_km2))
+  write_parquet(basico, sprintf("%s/01_basico.parquet", pasta_pqs))
+  rm(basico); gc(T)
+  cat("01_basico.parquet criado\n")
+} else {
+  cat("01_basico.parquet já existe, pulando...\n")
+}
+```
+
+```{r}
+#| label: csv-setores
+# Exportar csv com todos os setores censitários para uso nos temas a seguir
+setores <- sprintf("%s/00_setores.csv", pasta_pqs)
+
+if (file_exists(setores)) {
+  setores <- read_delim(setores, delim = ";", col_types = "c")
+  cat(paste0("CSV com setores censitários carregado (", nrow(setores), " setores)\n"))
+} else {
+  stop("00_setores.csv nao encontrado. Execute primeiro o bloco basico.")
+}
+```
+
+#### 3.2 Domicílios
+
+Junção dos cinco arquivos que contém informações sobre os domicílios.
+
+```{r}
+#| label: prqt-dom
+# Domicilios
+if (!file_exists(sprintf("%s/02_domicilio.parquet", pasta_pqs))) {
+
+  dom_patterns <- list.files(
+    pasta_arqs,
+    pattern = "domicilio.*\\.csv$",
+    full.names = FALSE
+  ) |>
+    
+    str_remove("^Agregados_por_setores_") |>
+    str_remove("_BR.*\\.csv$")
+
+  dom <- juntar_temas(dom_patterns, cod_setores = setores)
+
+  write_parquet(dom, sprintf("%s/02_domicilio.parquet", pasta_pqs))
+
+  rm(dom); gc(TRUE)
+  cat("02_domicilio.parquet criado\n")
+
+} else {
+  cat("02_domicilio.parquet já existe, pulando...\n")
+}
+```
+
+### 4. Explorar e validar os dados
+
+*Understand*
+
+```{r}
+#| label: understand
+# Resumo dos parquets finais
+pqs_files <- dir_ls(pasta_pqs, regexp = "\\.parquet$")
+pqs_info <- map_dfr(pqs_files, ~ {
+  df <- read_parquet(.x)
+  tibble(
+    arquivo = basename(.x),
+    n_setores = nrow(df), # número de setores censitários
+    n_vars = ncol(df), # número de colunas 
+    tamanho_mb = file_size(.x),
+    memoria_mb = round(object.size(df) / 1024^2, 1)
+  )
+})
+print(pqs_info)
+```
+
+#### Visão geral do parquet básico
+
+```{r}
+#| label: ver-pq-bas
+pqs_files |> 
+  keep(~ str_detect(basename(.x), "^01_")) |>  
+  walk(~ {
+    cat("\n====", basename(.x), "====\n")
+    read_parquet(.x) |> 
+      slice_head(n = 5) |> 
+      select(cd_setor, everything()) |>  
+      print(n = 6)  
+  })
+```
+
+#### Visão geral do parquet domicílios
+
+```{r}
+#| label: ver-pq-dom
+pqs_files |> 
+  keep(~ str_detect(basename(.x), "^02_")) |>  
+  walk(~ {
+    cat("\n====", basename(.x), "====\n")
+    read_parquet(.x) |> 
+      slice_head(n = 5) |> 
+      select(cd_setor, everything()) |>  
+      print(n = 6)  
+  })
+
+```

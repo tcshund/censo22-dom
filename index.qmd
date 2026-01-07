@@ -1,0 +1,20 @@
+---
+title: "censo2022-domicilios"
+---
+
+## Dados de Domicílios
+
+### Censo de 2022 - IBGE
+
+Este projeto processa e analisa os microdados do Censo Demográfico 2022.
+
+### Como usar
+
+1.  Execute o pipeline de importação: [**01-import-data.qmd**](01-import-data.qmd)
+2.  Os dados serão processados e organizados automaticamente
+
+### Estrutura
+
+-   `01-import-data.qmd` - Pipeline completo de download e conversão
+-   `data/` - Dados brutos e processados
+-   `docs/` - Site gerado (GitHub Pages)

@@ -1,0 +1,10 @@
+---
+title: "about"
+format: html
+---
+
+About this site
+
+```{r}
+1+1
+```
