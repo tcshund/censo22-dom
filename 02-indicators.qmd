@@ -1,0 +1,320 @@
+---
+title: "Indicators"
+author: "Thais Cshunderlick"
+format: html
+editor: visual
+---
+
+### Sobre
+
+Este script constrói um conjunto de indicadores relacionados ao **tema Domicílios**, a partir dos dados do **Censo Demográfico do [IBGE](https://www.ibge.gov.br/) de 2022**, para exibição na plataforma [**GeoReDUS**](https://www.redus.org.br/georedus). Os indicadores são calculados para **todos os setores censitários do Brasil**.
+
+Os indicadores produzidos abrangem os seguintes eixos:
+
+-   **Ocupação de Domicílios**\
+    Dados de domicílios particulares e coletivos ocupados e seus moradores.
+
+-   **Posse de Domicílios**\
+    Dentre os domicílios ocupados, indicadores que abrangem os particulares permanentes e improvisados e seus moradores com recortes de sexo.
+
+-   **Dados de Domicílios Particulares**\
+    Dentre os domicílios particulares, recortes de tipo de residência (casas, apartamentos) e de seus moradores, além de domicílios com mais de 6 moradores.
+
+Ao final, os resultados são organizados e exportados em **arquivos CSV**, que servem como base para análises e visualizações posteriores. Os indicadores seguem uma **nomenclatura padronizada**, que explicita o tema, o subtema, o recorte, a variante e o tipo de dado, permitindo a identificação direta do conteúdo de cada variável.
+
+### Bibliotecas
+
+*Load Packages*
+
+```{r}
+#| label: packages
+#| warning: false
+library(arrow)
+library(dplyr)
+library(fs)
+library(here)
+library(readr)
+library(tidyr)  
+```
+
+### 1. Configuração do ambiente
+
+*Set the Environment*
+
+```{r}
+#| label: set-the-environment
+# Definição da estrutura de pastas para organizar os dados 
+pasta_base <- here("data") 
+pasta_pqs <- sprintf("%s/02_processed", pasta_base)
+
+# Criação da pasta para salvar os csvs com os indicadores
+pasta_out <- sprintf("%s/03_indicators", pasta_base)
+dir.create(pasta_out, recursive = TRUE, showWarnings = FALSE)
+```
+
+### **2. Nomenclatura adotada**
+
+| **Tema** | **Subtema** | **ST** | **Descrição** | **Indicador/Variável** |
+|---------------|---------------|---------------|---------------|---------------|
+| dom01 | Ocupação | ocu | Domicilios Ocupados | dom01_ocu |
+| dom02 | Posse | dppo | Domicílios Particulares Permanentes Ocupados | dom02_dppo |
+| dom02 | Posse | dpio | Domicílios Particulares Improvisados Ocupados | dom02_dpio |
+| dom02 | Posse | dccm | Domicílios Coletivos Com Morador | dom02_dccm |
+| dom03 | Particulares | cas | Tipo de DPPO: Casas | dom03_cas |
+| dom03 | Particulares | apt | Tipo de DPPO: Apartamentos | dom03_apt |
+| dom03 | Particulares | 6mor | DPPO com mais de 6 moradores | dom03_6mor |
+
+: Indicadores de Domicílios
+
+| Sigla  | Recorte     |
+|--------|-------------|
+| tot    | Total       |
+| cor    | Cor ou Raça |
+| sex    | Sexo        |
+| corsex | Cor + Sexo  |
+
+: Recortes
+
+| Sigla | Variante                         |
+|-------|----------------------------------|
+| mor   | Moradores                        |
+| f     | Sexo Feminino                    |
+| m     | Sexo Masculino                   |
+| ama   | Pessoas Amarelas                 |
+| bra   | Pessoas Brancas                  |
+| ind   | Pessoas Indígenas                |
+| neg   | Pessoas Negras (Pretas + Pardas) |
+
+: Variantes
+
+| Tipo | Descrição                                                   |
+|------|-------------------------------------------------------------|
+| 0    | Dado bruto, usa diretamente a variável do IBGE (ex. V00001) |
+| 1    | Dado composto, faz soma ou subtração de variáveis do IBGE   |
+| 2    | Porcentagem (%), divide variáveis do IBGE                   |
+
+: Tipo de dado
+
+### 3. Leitura dos parquets
+
+O fluxo deste script parte sempre dos arquivos em formato parquet, que funcionam como a fonte de dados original e nunca são modificados diretamente.
+
+A leitura dos parquets carrega os dados em memória como *tibbles*, sobre os quais aplicamos transformações com `mutate()`, `filter()`, `group_by()`, `summarise()` e outras funções do *dplyr*. Essas operações criam colunas temporárias, fazem cálculos e reorganizam informações, mas tudo permanece apenas no objeto resultante em memória.
+
+Ao longo do fluxo, esses objetos transformados podem ser encadeados ou substituídos, mas não são gravados automaticamente em nenhum arquivo. Apenas na etapa final do script os resultados são efetivamentente salvos e exportados como CSVs.
+
+### 4. Criação e transformação das variáveis
+
+Com os dados já carregados, o script aplica operações do *dplyr*.\
+Cada linha indica uma nova **coluna derivada.**
+
+```{r}
+#| label: indicadores-dom
+#| message: false
+#| warning: false
+basico <- read_parquet(
+  sprintf("%s/01_basico.parquet", pasta_pqs))
+
+domicilios <- read_parquet(
+  sprintf("%s/02_domicilio.parquet", pasta_pqs)) %>%
+  replace(is.na(.), 0) %>%
+  mutate(
+      # # # Indicadores Absolutos
+      # dom01 - Ocupação 
+      # total de domicílios (dppo+dpio+dccm) 
+      dom01_ocu_tot_1 = V00001 + V00002 + V00003, 
+      # total de moradores (em dppo+dpio+dccm)
+      dom01_ocu_tot_mor_1 = V00005 + V00006 + V00007,
+      
+      # dom02 - Posse (apenas ocupados)
+      # domicílios particulares 
+      dom02_dppo_tot_0 = V00001, 
+      # moradores em dom particulares (V00011 + V00014)
+      dom02_dppo_tot_mor_0 = V00005, 
+      dom02_dppo_sex_m_0 = V00011,
+      dom02_dppo_sex_f_0 = V00014,
+      dom02_dpio_tot_0 = V00002, # improvisados
+      
+      # dom03 - Domicílios Particulares
+      # Casas
+      dom03_cas_tot_1 = V00047 + V00048, 
+      dom03_cas_tot_mor_1 = V00084 + V00085,
+      dom03_cas_sex_m_1 = V00502 + V00503,
+      dom03_cas_sex_f_1 = V00505 + V00506,
+      # Apartamentos
+      dom03_apt_tot_0 = V00049,
+      dom03_apt_tot_mor_0 = V00086,
+      dom03_apt_sex_m_0 = V00504,
+      dom03_apt_sex_f_0 = V00507,
+      # Domicílios com mais de 6 moradores
+      dom03_6mor_tot_1 =  V00022 + V00023 + V00024 + V00025 + V00026
+  ) %>%
+  mutate(
+    # # # Indicadores Relativos
+    # dom02 - Posse, em relação ao total de ocupados
+    dom02_dppo_tot_2 = dom02_dppo_tot_0 / dom01_ocu_tot_1,
+    dom02_dppo_tot_mor_2 = dom02_dppo_tot_mor_0 / dom01_ocu_tot_mor_1,
+    dom02_dppo_sex_f_2 = dom02_dppo_sex_f_0 / dom02_dppo_tot_mor_0,
+    dom02_dppo_sex_m_2 = dom02_dppo_sex_m_0 / dom02_dppo_tot_mor_0,  
+    dom02_dpio_tot_2 = dom02_dpio_tot_0 / dom01_ocu_tot_1,
+    
+    # dom03 - Domicílios Particulares 
+    # Casas
+    dom03_cas_tot_2 = dom03_cas_tot_1 / dom02_dppo_tot_0,
+    dom03_cas_tot_mor_2 = dom03_cas_tot_mor_1 / dom02_dppo_tot_mor_0,
+    dom03_cas_sex_m_2 = dom03_cas_sex_m_1 / dom02_dppo_sex_m_0,
+    dom03_cas_sex_f_2 = dom03_cas_sex_f_1 / dom02_dppo_sex_f_0,
+    # Apartamentos
+    dom03_apt_tot_2 = dom03_apt_tot_0 / dom02_dppo_tot_0,
+    dom03_apt_tot_mor_2 = dom03_apt_tot_mor_0 / dom02_dppo_tot_mor_0,
+    dom03_apt_sex_m_2 = dom03_apt_sex_m_0 / dom02_dppo_sex_m_0,  
+    dom03_apt_sex_f_2 = dom03_apt_sex_f_0 / dom02_dppo_sex_f_0,
+    # Domicílios com mais de 6 moradores
+    dom03_6mor_tot_2 = dom03_6mor_tot_1 / dom02_dppo_tot_0    
+  ) %>%
+  
+  select(matches("^(cd|dom)"))%>%
+
+  # Inclui "cn22" antes de cada um dos indicadores
+  rename_with(
+  ~ paste0("cn22_", .x),
+  starts_with("dom")
+  ) 
+```
+
+### 5. Exportando os indicadores de Domicílio
+
+As colunas criadas são unidas em novos csvs:
+
+```{r}
+#| label: export-indicadores-dom
+
+cn22dom <- basico %>%
+  left_join(domicilios, by="cd_setor") %>% 
+  rename(
+    cod_setor = cd_setor,
+    cod_bairro = cd_bairro,
+    cod_distrito = cd_dist,
+    cod_subdistrito = cd_subdist,
+    cod_municipio = cd_mun,
+    situacao_setor = situacao,
+    cod_uf = cd_uf,
+    nome_bairro = nm_bairro,
+    nome_distrito = nm_dist,
+    nome_municipio = nm_mun,
+    nome_subdistrito = nm_subdist,
+    nome_uf = nm_uf
+  )
+
+id_cols <- c(
+  "cod_setor","cod_bairro","cod_distrito","cod_subdistrito","cod_municipio",
+  "situacao_setor","cod_uf",
+  "nome_bairro","nome_distrito","nome_municipio","nome_subdistrito","nome_uf"
+)
+# Exportar as variáveis absolutas (brutas ou compostas)
+cn22dom_abs <- cn22dom %>%  
+  select(
+    all_of(id_cols),
+    ends_with("_0"),
+    ends_with("_1")
+  )
+
+cn22dom_abs %>%
+  write_csv(sprintf("%s/cn22dom_abs.csv", pasta_out))
+
+# Exportar as variáveis relativas (porcentagens)
+cn22dom_rel = cn22dom %>%
+  select(
+    all_of(id_cols),
+    ends_with("_2")
+  )
+
+cn22dom_rel %>%
+  write_csv(sprintf("%s/cn22dom_rel.csv", pasta_out))
+```
+
+### 6. Verificação dos indicadores exportados
+
+#### 6.1 Variáveis Absolutas
+
+Olhar geral no csv:
+
+```{r}
+#| label: check-glimpse-abs 
+glimpse(cn22dom_abs)
+```
+
+Presença das 12 colunas de identificação do arquivo básico:
+
+```{r}
+#| label: check-id-cols-abs 
+#| #| echo: false 
+id_presentes_abs <- sum(id_cols %in% names(cn22dom_abs)) 
+cat("- Absolutos:", id_presentes_abs, "/", length(id_cols), "IDs OK\n")
+```
+
+Integridade dos dados numéricos:
+
+```{r}
+#| label: check-dados-abs 
+#| echo: false 
+vars_abs <- names(cn22dom_abs)[!names(cn22dom_abs) %in% id_cols] 
+na_abs <- sum(sapply(cn22dom_abs[vars_abs], function(x) sum(is.na(x) | is.infinite(x)))) 
+cat("- Dados absolutos: ", ifelse(na_abs==0, "OK", paste("AVISO:", na_abs, "problemas!")), "\n")
+```
+
+Verificar dados aleatórios das variáveis absolutas de um município:
+
+```{r}
+#| label: check-abs-mun 
+# substitua pelo municipio que desejar 
+municipio_escolhido <- "Goiânia"   
+
+print(
+  cn22dom_abs %>%
+  filter(nome_municipio == municipio_escolhido) %>%     
+  slice_sample(n = 10) %>%     
+  # substitua "dom01" pelo indicador que deseja verificar     
+  # substitua "tot" pelo recorte que deseja verificar     
+    select(cod_setor, matches("dom01.*tot")),    
+    width = Inf 
+  )
+```
+
+#### 6.1 Variáveis Relativas
+
+Olhar geral no csv:
+
+```{r}
+#| label: check-glimpse-rel 
+glimpse(cn22dom_rel)
+```
+
+Presença das 12 colunas de identificação do arquivo básico:
+
+```{r}
+#| label: check-id-cols-rel 
+#| echo: false
+id_presentes_rel <- sum(id_cols %in% names(cn22dom_rel)) 
+cat("- Relativos: ", id_presentes_rel, "/", length(id_cols), "IDs OK\n\n")
+```
+
+Integridade dos dados numéricos:
+
+```{r}
+#| label: check-dados-rel 
+vars_rel <- names(cn22dom_rel)[!names(cn22dom_rel) %in% id_cols]
+
+conta_problemas <- function(x){   
+  c(     
+    "NA"     = sum(is.na(x) & !is.nan(x)),  # NA puro
+    "NaN"    = sum(is.nan(x)),               # NaN     
+    "Inf"    = sum(is.infinite(x) & x > 0),  # +Inf     
+    "NegInf" = sum(is.infinite(x) & x < 0)   # -Inf   
+    ) 
+  }  
+
+problemas_tipo <- t(sapply(cn22dom_rel[vars_rel], conta_problemas))  
+
+problemas_tipo
+```
