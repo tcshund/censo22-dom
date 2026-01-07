@@ -56,6 +56,7 @@ for (pasta in pastas) {
 pasta_logs <- pastas[1]  # Erros, arquivos de log
 pasta_arqs <- pastas[2]  # Dados brutos (zips baixados e csvs descompactados)
 pasta_pqs  <- pastas[3]  # Dados processados (parquets e csvs temáticos)
+# teste teste
 ```
 
 Aumentar o tempo máximo permitido para downloads:\
